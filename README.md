@@ -146,21 +146,22 @@ Sanity check:
 
 ```sql
 SELECT DB_NAME();
-···
-
+```
 ### 2) Generate JSONL (if using simulation)
-
-···bash
+```bash
 python3 -m src.simulate.generate_canvas --out-dir "${OUT_DIR:-data/out}"
 ```
 
-3) Load raw (full)
+### 3) Load raw (full)
 Examples (adjust --id-field to match your JSONL):
+```bash
 python3 -m src.load.load_raw --file data/out/canvas_users.jsonl       --conn "$DB_CONN" --table raw.canvas_users       --id-field canvas_user_id
 python3 -m src.load.load_raw --file data/out/canvas_courses.jsonl     --conn "$DB_CONN" --table raw.canvas_courses     --id-field canvas_course_id
 python3 -m src.load.load_raw --file data/out/canvas_enrollments.jsonl --conn "$DB_CONN" --table raw.canvas_enrollments --id-field enrollment_id
 python3 -m src.load.load_raw --file data/out/canvas_submissions.jsonl --conn "$DB_CONN" --table raw.canvas_submissions --id-field submission_id
-4) Load raw (incremental via watermark)
+```
+### 4) Load raw (incremental via watermark)
+```bash
 python3 -m src.load.load_raw \
     --file data/out/canvas_courses.jsonl \
     --conn "$DB_CONN" \
@@ -169,6 +170,7 @@ python3 -m src.load.load_raw \
     --source-name raw.canvas_courses \
     --incremental \
     --updated-field updated_at
+```
 5) Build identity map
 python3 -m src.transform.build_identity_map --conn "$DB_CONN"
 6) Build curated (incremental by ingested_at)
