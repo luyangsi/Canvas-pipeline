@@ -1,7 +1,6 @@
 
 ---
 
-```markdown
 # docs/architecture.md
 
 # Architecture
