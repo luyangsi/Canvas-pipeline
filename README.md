@@ -143,10 +143,17 @@ Optional:
 Run your DDL scripts against the **correct database** (not `master`).
 
 Sanity check:
+
 ```sql
 SELECT DB_NAME();
-2) Generate JSONL (if using simulation)
+···
+
+### 2) Generate JSONL (if using simulation)
+
+···bash
 python3 -m src.simulate.generate_canvas --out-dir "${OUT_DIR:-data/out}"
+```
+
 3) Load raw (full)
 Examples (adjust --id-field to match your JSONL):
 python3 -m src.load.load_raw --file data/out/canvas_users.jsonl       --conn "$DB_CONN" --table raw.canvas_users       --id-field canvas_user_id
