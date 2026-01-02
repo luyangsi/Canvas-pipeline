@@ -13,38 +13,40 @@ The design emphasizes:
 
 ## High-level data flow
 
+```text
 (1) Platform extracts (JSONL)
-data/out/canvas_users.jsonl
-data/out/canvas_courses.jsonl
-data/out/canvas_enrollments.jsonl
-data/out/canvas_submissions.jsonl
-|
-v
+    - data/out/canvas_users.jsonl
+    - data/out/canvas_courses.jsonl
+    - data/out/canvas_enrollments.jsonl
+    - data/out/canvas_submissions.jsonl
+    |
+    v
 (2) Raw landing in Azure SQL (traceable / re-loadable)
-raw.canvas_users
-raw.canvas_courses
-raw.canvas_enrollments
-raw.canvas_submissions
-|
-v
+    - raw.canvas_users
+    - raw.canvas_courses
+    - raw.canvas_enrollments
+    - raw.canvas_submissions
+    |
+    v
 (3) Identity mapping (person resolution)
-cur.person_identity_map
-meta.person_identity_map_dq (identity-related exceptions)
-|
-v
+    - cur.person_identity_map
+    - meta.person_identity_map_dq  (identity-related exceptions)
+    |
+    v
 (4) Curated analytics layer (dim/fact)
-cur.dim_student
-cur.dim_course
-cur.fact_submission
-|
-v
+    - cur.dim_student
+    - cur.dim_course
+    - cur.fact_submission
+    |
+    v
 (5) Data quality + run auditing (operational metadata)
-meta.job_run
-meta.dq_check_result
-|
-v
+    - meta.job_run
+    - meta.dq_check_result
+    |
+    v
 (6) Downstream consumption
-Reporting / Visualization (Power BI / Tableau)
+    - Reporting / Visualization (Power BI / Tableau)
+
 
 ## Data layers and schemas
 
@@ -194,4 +196,5 @@ The pipeline is designed to be safe to rerun:
 - Add incremental processing with watermarks (avoid full reprocessing)
 - Add schema snapshot + change log (change control)
 - Add reporting views for BI consumption
+
 
