@@ -196,13 +196,15 @@ python3 -m src.dq.run_checks --conn "$DB_CONN"
 ```sql
 SELECT * FROM meta.v_job_run_latest;
 ```
-Latest DQ summary (latest result per check)
+### Latest DQ summary (latest result per check)
+```sql
 SELECT * FROM meta.v_dq_latest_summary ORDER BY severity DESC, check_name;
-Latest schema changes
+```
+### Latest schema changes
+```sql
 SELECT TOP (50) * FROM meta.v_schema_changes_latest ORDER BY detected_at DESC;
-Watermark state
+```
+### Watermark state
+```sql
 SELECT * FROM meta.watermark ORDER BY source_name;
-Security note
-Never commit secrets. Store credentials in environment variables or local .env (gitignored).
-
----writer above content into the readme file
+```
