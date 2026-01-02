@@ -171,19 +171,31 @@ python3 -m src.load.load_raw \
     --incremental \
     --updated-field updated_at
 ```
-5) Build identity map
+### 5) Build identity map
+```bash
 python3 -m src.transform.build_identity_map --conn "$DB_CONN"
-6) Build curated (incremental by ingested_at)
+```
+### 6) Build curated (incremental by ingested_at)
+```bash
 python3 -m src.transform.build_curated --conn "$DB_CONN"
+```
 If your implementation supports an explicit boundary:
+```bash
 python3 -m src.transform.build_curated --conn "$DB_CONN" --since-ingested-at "2026-01-01T00:00:00Z"
-7) Run schema snapshot + change log
+```
+### 7) Run schema snapshot + change log
+```bash
 python3 -m src.meta.schema_snapshot --conn "$DB_CONN"
-8) Run DQ checks + job audit
+```
+### 8) Run DQ checks + job audit
+```bash
 python3 -m src.dq.run_checks --conn "$DB_CONN"
-Operations: what to look at
-Latest run status
+```
+## Operations: what to look at
+### Latest run status
+```sql
 SELECT * FROM meta.v_job_run_latest;
+```
 Latest DQ summary (latest result per check)
 SELECT * FROM meta.v_dq_latest_summary ORDER BY severity DESC, check_name;
 Latest schema changes
