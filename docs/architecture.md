@@ -13,7 +13,7 @@ The design emphasizes:
 
 ## High-level data flow
 
-```text
+```
 (1) Platform extracts (JSONL)
     - data/out/canvas_users.jsonl
     - data/out/canvas_courses.jsonl
@@ -46,7 +46,7 @@ The design emphasizes:
     v
 (6) Downstream consumption
     - Reporting / Visualization (Power BI / Tableau)
-```text
+```
 
 ## Data layers and schemas
 
@@ -196,6 +196,7 @@ The pipeline is designed to be safe to rerun:
 - Add incremental processing with watermarks (avoid full reprocessing)
 - Add schema snapshot + change log (change control)
 - Add reporting views for BI consumption
+
 
 
 
