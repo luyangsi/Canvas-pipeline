@@ -1,19 +1,24 @@
+
+---
+
+```markdown
+# docs/architecture.md
+
 # Architecture
 
 ## Purpose
-
-This repository implements a small, production-style data pipeline that ingests **platform-like** records (Canvas-style JSONL), lands them in **Azure SQL** for traceability, transforms them into **analytics-ready curated tables**, and records **run auditing + data quality** results for operational visibility.
+This repository implements a production-style data pipeline that ingests **platform-like** datasets (Canvas-style JSONL), lands them in **Azure SQL** for traceability and replay, transforms them into **analytics-ready curated tables**, and records **run auditing + data quality + schema drift detection** metadata for operational monitoring.
 
 The design emphasizes:
 - clear data lifecycle separation (landing vs curated vs operational metadata)
-- idempotent reruns (safe to reprocess)
-- integrity and governance hooks (DQ + audit logs)
+- incremental processing and rerun safety
+- integrity and governance hooks (DQ + auditing + schema drift)
 
 ---
 
 ## High-level data flow
 
-```
+```text
 (1) Platform extracts (JSONL)
     - data/out/canvas_users.jsonl
     - data/out/canvas_courses.jsonl
@@ -21,7 +26,7 @@ The design emphasizes:
     - data/out/canvas_submissions.jsonl
     |
     v
-(2) Raw landing in Azure SQL (traceable / re-loadable)
+(2) Raw landing (Azure SQL: traceable / re-loadable)
     - raw.canvas_users
     - raw.canvas_courses
     - raw.canvas_enrollments
@@ -39,165 +44,79 @@ The design emphasizes:
     - cur.fact_submission
     |
     v
-(5) Data quality + run auditing (operational metadata)
-    - meta.job_run
-    - meta.dq_check_result
+(5) Operational monitoring & governance metadata
+    - meta.job_run              (status, duration, metrics_json)
+    - meta.dq_check_result      (severity, failed_rows, sample_keys)
+    - meta.watermark            (incremental state per source)
+    - meta.schema_snapshot      (schema JSON)
+    - meta.schema_change_log    (schema diffs)
     |
     v
 (6) Downstream consumption
     - Reporting / Visualization (Power BI / Tableau)
+    - Monitoring views (meta.v_* for ops)
 ```
 
-## Data layers and schemas
+## Schemas and responsibilities
 
-This project uses schemas to separate stages in the data lifecycle:
+- raw — landed as‑is (traceable)
+    - Stores records in a consistent raw shape including a raw_payload JSON for replay/debugging.
+    - Designed for reprocessing/backfills and for separating ingestion from modeling.
 
-### `raw` — landed as-is (traceable)
-- Stores each record in a consistent raw shape:
-  - primary identifier
-  - `raw_payload` (JSON string)
-  - timestamps (`updated_at`, `ingested_at`)
-- Raw is designed to be **reloadable** and supports debugging/backfills.
+- cur — curated outputs (analytics‑ready)
+    - Parses and normalizes raw JSON into relational tables suitable for reporting.
+    - Applies stable keying and join strategy:
+        - canvas_user_id → gies_person_id (via identity mapping)
+        - canvas_course_id → course_key (via course dimension)
 
-### `cur` — curated outputs (analytics-ready)
-- Parses and normalizes raw JSON into relational tables suitable for reporting.
-- Implements key mapping to support consistent joins:
-  - students/person identities
-  - course keys
-
-### `meta` — pipeline metadata and data quality
-- Captures run-level audit information and DQ results.
-- Supports operational workflows: monitoring, troubleshooting, and trend tracking.
-
-### `stg` — reserved (optional extension)
-- Not required for Day 1.
-- Intended for future: validated/typed staging tables to isolate parsing + validation from curated modeling.
+- meta — operational metadata, quality, and change control
+    - Provides observability and governance:
+        - run auditing (meta.job_run)
+        - data quality results (meta.dq_check_result)
+        - incremental state (meta.watermark)
+        - schema snapshots + diffs (meta.schema_snapshot, meta.schema_change_log)
+    - Exposes monitoring views for triage:
+        - meta.v_job_run_latest
+        - meta.v_dq_latest_summary
+        - meta.v_schema_changes_latest
 
 ---
 
-## Current tables
+## Incremental processing strategy
 
-### Raw layer (`raw`)
-- `raw.canvas_users`
-  - as-is user records (one row per platform user)
-- `raw.canvas_courses`
-  - as-is course records (one row per course)
-- `raw.canvas_enrollments`
-  - as-is enrollment records (user ↔ course membership)
-- `raw.canvas_submissions`
-  - as-is submission records (assessment submissions)
+- Incremental raw ingestion (watermark + updated_at)
+    - Loader: src/load/load_raw.py supports:
+        - --source-name (e.g., raw.canvas_courses)
+        - --incremental
+        - --updated-field (default: updated_at)
+    - Behavior per run:
+        - Read meta.watermark.last_updated_at for the source_name.
+        - Parse record_updated_at from each JSON record.
+        - Skip records where record_updated_at <= watermark.
+        - Upsert passing records into the raw table.
+        - Update meta.watermark to the max written record_updated_at for the run.
 
-> All raw tables store the original JSON in `raw_payload` and are keyed by a stable identifier.
-
-### Curated layer (`cur`)
-- `cur.person_identity_map`
-  - unified identity mapping table used to connect platform identifiers to a consistent person key
-- `cur.dim_student`
-  - student dimension built from identity mapping (reporting-friendly attributes)
-- `cur.dim_course`
-  - course dimension built from raw course records
-- `cur.fact_submission`
-  - submission fact table mapped to student and course keys
-
-### Metadata / DQ (`meta`)
-- `meta.job_run`
-  - one row per pipeline/DQ execution (status, timestamps, row counts)
-- `meta.dq_check_result`
-  - one row per DQ check execution (pass/fail + counts + samples)
-- `meta.person_identity_map_dq`
-  - DQ exceptions specific to identity mapping (e.g., duplicate email, missing email)
+- Incremental curated builds (ingested_at boundary)
+    - Curated transforms avoid full scans by driving incrementality from raw.ingested_at.
+    - A since_ingested_at concept (CLI or auto-resolved) filters raw reads to the changed window.
+    - Curated outputs are applied via staging tables + MERGE to ensure idempotence and rerun safety.
 
 ---
 
-## Key transformations and business rules
+## Observability and data quality
 
-### Identity mapping (person resolution)
-Goal: produce a consistent person key for analytics.
+- Run auditing (meta.job_run)
+    - Records status transitions (running → success/failed), start/end times, duration_ms.
+    - Includes a flexible metrics_json payload for per‑table counts and diagnostics.
 
-- Normalize email (e.g., lowercased, trimmed) into `email_normalized`.
-- Deterministic match strategy: email-based primary identity.
-- Output:
-  - `cur.person_identity_map` includes:
-    - `gies_person_id` (surrogate key)
-    - `canvas_user_id`
-    - `email_normalized`
-    - `match_method`, `match_confidence`
-- Exceptions (e.g., missing email, duplicate email mapping) are written to:
-  - `meta.person_identity_map_dq`
+- Data quality (meta.dq_check_result)
+    - Each check writes: severity (info/warn/error), failed_rows, sample_keys (up to 10 IDs).
+    - Identity exceptions captured in meta.person_identity_map_dq for targeted triage.
 
-### Course mapping
-Goal: stable course join key for reporting.
-
-- `cur.dim_course` is keyed by the platform course id (e.g., `canvas_course_id`) and provides a surrogate `course_key` for joins.
-
-### Fact submissions
-Goal: analytics-ready submission records.
-
-- Parse raw submissions into relational fields (submitted_at, score, etc.)
-- Map:
-  - `user_id` → `gies_person_id` (via identity map)
-  - `course_id` → `course_key` (via course dimension)
-- If mapping fails (e.g., submission user_id not found in identity map), it is tracked as a coverage/integrity issue and surfaced in DQ outputs.
-
----
-
-## Workflow (Day 1 run sequence)
-
-1. **DDL / Setup**
-   - Create schemas and tables in Azure SQL (`raw`, `cur`, `meta`)
-
-2. **Generate extracts (simulation)**
-   - Produce JSONL files in `data/out/` (one JSON object per line)
-
-3. **Load raw**
-   - Upsert JSONL records into `raw.canvas_*` tables
-   - Store original record in `raw_payload`
-
-4. **Build identity map**
-   - Create/update `cur.person_identity_map`
-   - Write identity-related exceptions to `meta.person_identity_map_dq` (if any)
-
-5. **Build curated tables**
-   - Create/update `cur.dim_student`, `cur.dim_course`, `cur.fact_submission`
-
-6. **Run DQ checks + job audit**
-   - Insert/update `meta.job_run`
-   - Write results to `meta.dq_check_result`
-
----
-
-## Idempotency and reruns
-
-The pipeline is designed to be safe to rerun:
-
-- Raw ingestion uses upsert keyed by a stable identifier (last write wins for the same id).
-- Curated tables are built with upsert semantics to avoid duplicates.
-- DQ and job auditing append new run records for traceability.
-
----
-
-## Operational notes (common failure modes)
-
-- Azure SQL connectivity issues are often firewall-related:
-  - `Client IP is not allowed` → add your public IP to SQL server firewall rules
-- ODBC driver / pyodbc dependencies:
-  - Missing Driver 18 / unixODBC can prevent connections
-- Object not found errors:
-  - `Invalid object name ...` typically means DDL wasn’t run in the correct database
-  - Verify active DB with `SELECT DB_NAME();`
-- macOS Python invocation:
-  - use `python3` (not `python`) unless you set an alias
-
----
-
-## Next extensions (not required for Day 1)
-
-- Add `stg` layer for typed staging and stricter validation
-- Add incremental processing with watermarks (avoid full reprocessing)
-- Add schema snapshot + change log (change control)
-- Add reporting views for BI consumption
-
-
-
-
-
+- Change control (schema drift detection)
+    - Snapshot + diff model:
+        - meta.schema_snapshot stores point‑in‑time schema JSON per table.
+        - meta.schema_change_log records deltas: table_added, table_missing, column_added, column_removed, column_changed.
+    - Snapshot script (src/meta/schema_snapshot.py):
+        - Reads INFORMATION_SCHEMA.COLUMNS, normalizes schema representation, diffs against the latest snapshot, writes change log events and a new snapshot.
+    - Purpose: protect the pipeline from silent drift that can cause runtime breaks (missing columns, type mismatches, invalid object names).

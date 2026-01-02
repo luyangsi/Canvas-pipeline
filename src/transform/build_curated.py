@@ -15,6 +15,10 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utcnow_naive() -> datetime:
+    return datetime.utcnow()
+
+
 def jget(d: Dict[str, Any], key: str, default=None):
     v = d.get(key, default)
     return default if v is None else v
@@ -31,9 +35,74 @@ def parse_dt(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def parse_cli_dt_to_naive_utc(s: Optional[str]) -> Optional[datetime]:
+    """
+    Parse CLI timestamp to naive UTC datetime2.
+    Examples:
+      2026-01-01T00:00:00Z
+      2026-01-01T00:00:00+00:00
+      2026-01-01 00:00:00
+    """
+    if not s:
+        return None
+    ss = s.strip()
+    if not ss:
+        return None
+    ss = ss.replace(" ", "T")
+    dt = parse_dt(ss)
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def chunked(rows: List[Tuple], n: int) -> Iterable[List[Tuple]]:
     for i in range(0, len(rows), n):
         yield rows[i : i + n]
+
+
+# -------------------------
+# watermark helpers (meta.watermark)
+# -------------------------
+WATERMARK_DDL = r"""
+IF SCHEMA_ID('meta') IS NULL EXEC('CREATE SCHEMA meta');
+
+IF OBJECT_ID('meta.watermark','U') IS NULL
+BEGIN
+  CREATE TABLE meta.watermark (
+    source_name     NVARCHAR(255) NOT NULL PRIMARY KEY,
+    last_updated_at DATETIME2 NULL,
+    updated_at      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+  );
+END
+"""
+
+
+def get_last_watermark(cur: pyodbc.Cursor, source_name: str) -> Optional[datetime]:
+    row = cur.execute(
+        "SELECT last_updated_at FROM meta.watermark WHERE source_name = ?",
+        source_name,
+    ).fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def upsert_watermark(cur: pyodbc.Cursor, source_name: str, last_updated_at: datetime) -> None:
+    sql = """
+UPDATE meta.watermark
+SET last_updated_at = ?,
+    updated_at = SYSUTCDATETIME()
+WHERE source_name = ?;
+
+IF @@ROWCOUNT = 0
+BEGIN
+  INSERT INTO meta.watermark (source_name, last_updated_at, updated_at)
+  VALUES (?, ?, SYSUTCDATETIME());
+END
+"""
+    cur.execute(sql, last_updated_at, source_name, source_name, last_updated_at)
 
 
 # -------------------------
@@ -58,7 +127,7 @@ BEGIN
   );
 END
 
--- dim_course: parsed from raw.canvas_courses (id, raw_payload, updated_at)
+-- dim_course: parsed from raw.canvas_courses (id, raw_payload, updated_at, ingested_at)
 IF OBJECT_ID('cur.dim_course','U') IS NULL
 BEGIN
   CREATE TABLE cur.dim_course (
@@ -80,7 +149,7 @@ BEGIN
   );
 END
 
--- fact_submission: parsed from raw.canvas_submissions (id, raw_payload, updated_at)
+-- fact_submission: parsed from raw.canvas_submissions (id, raw_payload, updated_at, ingested_at)
 IF OBJECT_ID('cur.fact_submission','U') IS NULL
 BEGIN
   CREATE TABLE cur.fact_submission (
@@ -189,16 +258,28 @@ def load_student_key_map(cur: pyodbc.Cursor) -> Dict[int, int]:
 
 
 # -------------------------
-# dim_course from raw.canvas_courses
+# dim_course from raw.canvas_courses (incremental by ingested_at)
 # -------------------------
-def read_raw_courses(cur: pyodbc.Cursor) -> List[Tuple]:
-    rows = cur.execute("""
-      SELECT id, raw_payload, updated_at
-      FROM raw.canvas_courses
-    """).fetchall()
+def read_raw_courses(cur: pyodbc.Cursor, since_ingested_at: Optional[datetime]) -> Tuple[List[Tuple], Optional[datetime]]:
+    if since_ingested_at is None:
+        rows = cur.execute("""
+          SELECT id, raw_payload, updated_at, ingested_at
+          FROM raw.canvas_courses
+        """).fetchall()
+    else:
+        rows = cur.execute("""
+          SELECT id, raw_payload, updated_at, ingested_at
+          FROM raw.canvas_courses
+          WHERE ingested_at >= ?
+        """, since_ingested_at).fetchall()
 
     out: List[Tuple] = []
-    for course_id, raw_payload, raw_updated_at in rows:
+    max_ing: Optional[datetime] = None
+
+    for course_id, raw_payload, raw_updated_at, ingested_at in rows:
+        if ingested_at is not None and (max_ing is None or ingested_at > max_ing):
+            max_ing = ingested_at
+
         try:
             d = json.loads(raw_payload)
         except Exception:
@@ -218,7 +299,7 @@ def read_raw_courses(cur: pyodbc.Cursor) -> List[Tuple]:
             term_name = term.get("name")
 
         out.append((
-            int(course_id),  # raw.canvas_courses.id
+            int(course_id),
             name,
             course_code,
             workflow_state,
@@ -230,7 +311,7 @@ def read_raw_courses(cur: pyodbc.Cursor) -> List[Tuple]:
             raw_updated_at,
             utcnow(),
         ))
-    return out
+    return out, max_ing
 
 
 def merge_dim_course(conn: pyodbc.Connection, rows: List[Tuple], batch_size: int = 2000) -> None:
@@ -296,23 +377,35 @@ def load_course_key_map(cur: pyodbc.Cursor) -> Dict[int, int]:
 
 
 # -------------------------
-# fact_submission from raw.canvas_submissions
+# fact_submission from raw.canvas_submissions (incremental by ingested_at)
 # -------------------------
 def read_raw_submissions(
     cur: pyodbc.Cursor,
     student_key_map: Dict[int, int],
     course_key_map: Dict[int, int],
-) -> Tuple[List[Tuple], int, int]:
-    rows = cur.execute("""
-      SELECT id, raw_payload, updated_at
-      FROM raw.canvas_submissions
-    """).fetchall()
+    since_ingested_at: Optional[datetime],
+) -> Tuple[List[Tuple], int, int, Optional[datetime]]:
+    if since_ingested_at is None:
+        rows = cur.execute("""
+          SELECT id, raw_payload, updated_at, ingested_at
+          FROM raw.canvas_submissions
+        """).fetchall()
+    else:
+        rows = cur.execute("""
+          SELECT id, raw_payload, updated_at, ingested_at
+          FROM raw.canvas_submissions
+          WHERE ingested_at >= ?
+        """, since_ingested_at).fetchall()
 
     out: List[Tuple] = []
     skip_user = 0
     skip_course = 0
+    max_ing: Optional[datetime] = None
 
-    for submission_id, raw_payload, raw_updated_at in rows:
+    for submission_id, raw_payload, raw_updated_at, ingested_at in rows:
+        if ingested_at is not None and (max_ing is None or ingested_at > max_ing):
+            max_ing = ingested_at
+
         try:
             d = json.loads(raw_payload)
         except Exception:
@@ -344,10 +437,8 @@ def read_raw_submissions(
         late = jget(d, "late")
         missing = jget(d, "missing")
 
-        # may not exist in submission payload
         due_at = parse_dt(jget(d, "due_at"))
 
-        # on_time_flag:
         on_time_flag = None
         if due_at and submitted_at:
             on_time_flag = 1 if submitted_at <= due_at else 0
@@ -358,7 +449,7 @@ def read_raw_submissions(
                 on_time_flag = None
 
         out.append((
-            int(submission_id),  # raw.canvas_submissions.id
+            int(submission_id),
             int(gies_person_id) if gies_person_id is not None else None,
             int(course_key) if course_key is not None else None,
             int(canvas_user_id) if canvas_user_id is not None else None,
@@ -377,7 +468,7 @@ def read_raw_submissions(
             utcnow(),
         ))
 
-    return out, skip_user, skip_course
+    return out, skip_user, skip_course, max_ing
 
 
 def merge_fact_submission(conn: pyodbc.Connection, rows: List[Tuple], batch_size: int = 2000) -> None:
@@ -460,12 +551,34 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--conn", required=True, help="ODBC connection string")
     ap.add_argument("--batch-size", type=int, default=2000)
+
+    # NEW: incremental by ingested_at
+    ap.add_argument(
+        "--since-ingested-at",
+        default=None,
+        help="Optional ISO timestamp. If omitted, use meta.watermark('raw.canvas_submissions') as since.",
+    )
+
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     conn = pyodbc.connect(args.conn, autocommit=False)
     cur = conn.cursor()
+
+    # ensure meta.watermark exists
+    cur.execute(WATERMARK_DDL)
+    conn.commit()
+
+    # compute since_ingested_at
+    since_ingested_at = parse_cli_dt_to_naive_utc(args.since_ingested_at)
+    if args.since_ingested_at and since_ingested_at is None:
+        raise ValueError(f"Invalid --since-ingested-at: {args.since_ingested_at}")
+
+    if since_ingested_at is None:
+        since_ingested_at = get_last_watermark(cur, "raw.canvas_submissions")
+
+    logging.info("since_ingested_at=%s", since_ingested_at)
 
     logging.info("Ensuring curated schema/tables...")
     cur.execute(DDL)
@@ -482,8 +595,8 @@ def main():
     student_key_map = load_student_key_map(cur)
     logging.info("student_key_map size=%d", len(student_key_map))
 
-    logging.info("Reading raw courses...")
-    course_rows = read_raw_courses(cur)
+    logging.info("Reading raw courses (incremental by ingested_at)...")
+    course_rows, max_course_ing = read_raw_courses(cur, since_ingested_at)
     logging.info("parsed courses=%d", len(course_rows))
 
     logging.info("Upserting cur.dim_course...")
@@ -493,16 +606,41 @@ def main():
     course_key_map = load_course_key_map(cur)
     logging.info("course_key_map size=%d", len(course_key_map))
 
-    logging.info("Reading raw submissions...")
-    sub_rows, skip_user, skip_course = read_raw_submissions(cur, student_key_map, course_key_map)
-    logging.info("parsed submissions=%d (no_student_key=%d, no_course_key=%d)", len(sub_rows), skip_user, skip_course)
+    logging.info("Reading raw submissions (incremental by ingested_at)...")
+    sub_rows, skip_user, skip_course, max_sub_ing = read_raw_submissions(
+        cur, student_key_map, course_key_map, since_ingested_at
+    )
+    logging.info(
+        "parsed submissions=%d (no_student_key=%d, no_course_key=%d)",
+        len(sub_rows),
+        skip_user,
+        skip_course,
+    )
 
     logging.info("Upserting cur.fact_submission...")
     merge_fact_submission(conn, sub_rows, batch_size=args.batch_size)
+
+    # choose processed_through as max ingested_at we saw
+    processed_through: Optional[datetime] = None
+    for x in (max_course_ing, max_sub_ing):
+        if x is not None and (processed_through is None or x > processed_through):
+            processed_through = x
+
+    if processed_through is not None:
+        logging.info("Updating watermarks processed_through=%s", processed_through)
+        # advance raw anchor
+        upsert_watermark(cur, "raw.canvas_submissions", processed_through)
+        # curated watermarks
+        upsert_watermark(cur, "cur.dim_course", processed_through)
+        upsert_watermark(cur, "cur.fact_submission", processed_through)
+        # dim_student is effectively full refresh; still record run time
+        upsert_watermark(cur, "cur.dim_student", utcnow_naive())
+        conn.commit()
+    else:
+        logging.info("No new raw rows processed; watermarks unchanged.")
 
     logging.info("DONE")
 
 
 if __name__ == "__main__":
     main()
-
