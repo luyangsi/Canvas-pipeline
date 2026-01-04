@@ -42,7 +42,7 @@ BEGIN
   );
 END
 
--- ✅ Step 3.1: add duration + metrics_json (compatible ALTER)
+-- add duration + metrics_json (compatible ALTER)
 IF COL_LENGTH('meta.job_run','duration_ms') IS NULL
   ALTER TABLE meta.job_run ADD duration_ms BIGINT NULL;
 
@@ -65,7 +65,7 @@ BEGIN
   );
 END
 
--- ✅ Step 3.2: sample_keys column (JSON array, up to 10 ids/keys)
+-- sample_keys column (JSON array, up to 10 ids/keys)
 IF COL_LENGTH('meta.dq_check_result','sample_keys') IS NULL
   ALTER TABLE meta.dq_check_result ADD sample_keys NVARCHAR(MAX) NULL;
 """
@@ -87,9 +87,6 @@ def table_exists(cur: pyodbc.Cursor, full_name: str) -> bool:
     return cur.execute("SELECT OBJECT_ID(?, 'U')", full_name).fetchone()[0] is not None
 
 
-# -------------------------
-# small helper: sample keys
-# -------------------------
 def fetch_sample_keys(cur: pyodbc.Cursor, sql: str, params: Tuple = (), limit: int = 10) -> List[str]:
     rows = cur.execute(sql, params).fetchall()
     out: List[str] = []
@@ -103,9 +100,7 @@ def fetch_sample_keys(cur: pyodbc.Cursor, sql: str, params: Tuple = (), limit: i
     return out[:limit]
 
 
-# -------------------------
-# Job run metadata
-# -------------------------
+
 def insert_job_run_running(cur: pyodbc.Cursor, job_name: str) -> int:
     cur.execute(
         """
@@ -204,9 +199,7 @@ def insert_dq_result(
     )
 
 
-# -------------------------
-# Checks
-# -------------------------
+
 def check_raw_users_pk_unique(cur: pyodbc.Cursor, raw_users: str) -> Tuple[Dict[str, Any], int, List[str]]:
     total, distinct_ids = cur.execute(
         f"SELECT COUNT_BIG(*), COUNT_BIG(DISTINCT id) FROM {raw_users};"
@@ -330,7 +323,7 @@ def check_identity_map_email_dupe(cur: pyodbc.Cursor) -> Tuple[Dict[str, Any], i
     return details, rows_with_email, sample
 
 
-# ✅ FIXED (no aggregate-over-subquery): use LEFT JOIN then aggregate
+
 def check_fact_submission_person_coverage(cur: pyodbc.Cursor) -> Tuple[Dict[str, Any], int, List[str]]:
     total, null_fk, bad_fk = cur.execute(
         """
@@ -386,7 +379,7 @@ def check_fact_submission_person_coverage(cur: pyodbc.Cursor) -> Tuple[Dict[str,
     return details, total, sample
 
 
-# ✅ FIXED (no aggregate-over-subquery): use LEFT JOIN then aggregate
+
 def check_fact_submission_course_coverage(cur: pyodbc.Cursor) -> Tuple[Dict[str, Any], int, List[str]]:
     total, null_fk, bad_fk = cur.execute(
         """
@@ -524,8 +517,8 @@ def check_reconcile_raw_vs_fact(cur: pyodbc.Cursor, raw_submissions: str) -> Tup
         "orphans_in_fact_person_null": orphan_person,
         "orphans_in_fact_course_null": orphan_course,
         "notes": [
-            "missing_in_fact 通常来自解析失败、写入失败或被过滤",
-            "orphans 通常来自维表映射失败（identity_map/course 不齐）",
+            "missing_in_fact",
+            "orphans",
         ],
     }
     return details, raw_total, sample
