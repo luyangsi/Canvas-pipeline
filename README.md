@@ -59,30 +59,18 @@ See `docs/architecture.md` for details.
 - Python 3.x (macOS: use `python3`)
 - `pyodbc`
 - Microsoft ODBC Driver 18 for SQL Server + unixODBC (macOS)
-- VS Code + MSSQL extension (optional but recommended for running SQL)
 
 ### Environment variables
 Copy `settings.example.env` to `.env` and fill in values, or export variables in your shell.
 
 Required:
 - `DB_CONN` (ODBC connection string)
-
-Optional:
-- `LOG_LEVEL`
-- `OUT_DIR`
-
 ---
 
 ## Quickstart
 
 ### 1) Create schemas/tables
 Run your DDL scripts against the **correct database** (not `master`).
-
-Sanity check:
-
-```sql
-SELECT DB_NAME();
-```
 ### 2) Generate JSONL (if using simulation)
 ```bash
 python3 -m src.simulate.generate_canvas --out-dir "${OUT_DIR:-data/out}"
