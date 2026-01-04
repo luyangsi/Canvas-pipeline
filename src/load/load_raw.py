@@ -1,35 +1,7 @@
 
 #!/usr/bin/env python3
 # file: /Users/luyangsi/Desktop/Canvas-pipeline/src/load/load_raw.py
-"""
-简易 JSONL -> SQL Server raw 层上报脚本（按主键 upsert: 先 UPDATE 再 IF @@ROWCOUNT=0 INSERT）
 
-新增：
-- --source-name（例如 canvas_courses）
-- --incremental（flag）
-- --updated-field（默认 updated_at；表示“从 JSON 里提取 updated_at 的字段名/路径”，支持点号路径如 data.updated_at）
-
-增量逻辑：
-如果 --incremental：
-1) 先查 meta.watermark 取 last_updated_at
-2) 读 JSONL 每行，解析 updated_at（从 JSON 中提取；没有就设为 NULL）
-3) 若 updated_at 不为空 且 updated_at <= last_watermark：跳过（不写库）
-4) 只对通过筛选的记录做 upsert
-5) 成功后：把本次写入记录中的 max(updated_at) 更新到 meta.watermark
-
-表结构示例（仅参考）:
-    CREATE TABLE meta.watermark (
-        source_name     NVARCHAR(255) NOT NULL PRIMARY KEY,
-        last_updated_at DATETIME2 NULL,
-        updated_at      DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-    );
-
-    CREATE TABLE dbo.raw_payloads (
-        id NVARCHAR(255) PRIMARY KEY,
-        raw_payload NVARCHAR(MAX),
-        updated_at DATETIME2 NULL
-    );
-"""
 
 import argparse
 import datetime
@@ -41,11 +13,7 @@ import pyodbc
 
 
 def extract_by_path(obj: Any, path: str) -> Any:
-    """
-    从 dict 中按点号路径取值：
-      - path="updated_at" 或 "data.updated_at"
-    找不到返回 None
-    """
+
     if obj is None or path is None:
         return None
     if not isinstance(obj, dict):
@@ -60,15 +28,10 @@ def extract_by_path(obj: Any, path: str) -> Any:
 
 
 def parse_iso_datetime(val: Any) -> Optional[datetime.datetime]:
-    """
-    解析常见 ISO8601 时间字符串；支持末尾 Z。
-    返回 naive datetime（去掉 tzinfo，统一用 UTC 表示）
-    解析失败返回 None
-    """
+   
     if val is None:
         return None
     if isinstance(val, datetime.datetime):
-        # 统一转 naive
         return val.replace(tzinfo=None)
     if not isinstance(val, str):
         return None
@@ -78,12 +41,11 @@ def parse_iso_datetime(val: Any) -> Optional[datetime.datetime]:
         return None
 
     try:
-        # 处理 Z
+        
         if s.endswith("Z"):
             dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
         else:
             dt = datetime.datetime.fromisoformat(s)
-        # 去 tzinfo，按 UTC naive 存
         if dt.tzinfo is not None:
             dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
         return dt
@@ -107,9 +69,6 @@ def get_last_watermark(cursor: Any, source_name: str) -> Optional[datetime.datet
 
 
 def upsert_watermark(cursor: Any, source_name: str, last_updated_at: datetime.datetime) -> None:
-    """
-    更新/插入 meta.watermark
-    """
     sql = """
 UPDATE meta.watermark
 SET last_updated_at = ?,
@@ -132,10 +91,6 @@ def upsert_record(
     payload: str,
     updated_at: Optional[datetime.datetime],
 ) -> None:
-    """
-    使用 UPDATE ... IF @@ROWCOUNT=0 INSERT 的方式做 upsert（防止重复写入）
-    假定主键列名为 id，payload 列名为 raw_payload，时间列名为 updated_at（允许 NULL）。
-    """
     sql = f"""
 DECLARE @id NVARCHAR(255) = ?;
 DECLARE @payload NVARCHAR(MAX) = ?;
@@ -173,8 +128,8 @@ def load_jsonl_to_db(
             raise ValueError("--source-name is required when --incremental is set")
         last_watermark = get_last_watermark(cursor, source_name)
 
-    total = 0          # upsert 成功条数
-    skipped = 0        # 增量跳过条数
+    total = 0          
+    skipped = 0        
     failed = 0
 
     max_written_updated_at: Optional[datetime.datetime] = None
@@ -193,12 +148,9 @@ def load_jsonl_to_db(
                 id_val = str(obj[id_field])
 
                 raw_payload = json.dumps(obj, ensure_ascii=False)
-
-                # 从 JSON 按路径提取 updated_at；没有就 NULL
+                
                 src_updated = extract_by_path(obj, updated_field)
                 updated_at = parse_iso_datetime(src_updated)  # None if missing/unparseable
-
-                # 增量过滤：updated_at 不为空 且 <= watermark => 跳过
                 if incremental and last_watermark is not None:
                     if updated_at is not None and updated_at <= last_watermark:
                         skipped += 1
@@ -215,7 +167,7 @@ def load_jsonl_to_db(
                 failed += 1
                 print(f"[WARN] line {line_no} upsert failed: {e}", file=sys.stderr)
 
-    # 成功后更新 watermark
+
     if incremental and source_name and max_written_updated_at is not None:
         upsert_watermark(cursor, source_name, max_written_updated_at)
 
@@ -230,22 +182,21 @@ def load_jsonl_to_db(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load JSONL into SQL Server raw layer (upsert by id).")
-    parser.add_argument("--file", required=True, help="输入 JSONL 文件路径")
+    parser.add_argument("--file", required=True, help="enter JSONL pathway")
     parser.add_argument(
         "--conn",
         required=True,
-        help="ODBC 连接字符串，例如: DRIVER={ODBC Driver 18 for SQL Server};SERVER=...;DATABASE=...;UID=...;PWD=...",
+        help="DRIVER={ODBC Driver 18 for SQL Server};SERVER=...;DATABASE=...;UID=...;PWD=...",
     )
-    parser.add_argument("--table", required=True, help="目标表，带 schema，例如 raw.canvas_courses")
-    parser.add_argument("--id-field", default="id", help="JSON 中作为主键的字段名，默认 'id'")
+    parser.add_argument("--table", required=True, help="")
+    parser.add_argument("--id-field", default="id", help="")
 
-    # 新增参数
-    parser.add_argument("--source-name", help="增量水位表中的 source_name，例如 canvas_courses")
-    parser.add_argument("--incremental", action="store_true", help="启用增量加载（基于 meta.watermark）")
+    parser.add_argument("--source-name", help="source_name，such as canvas_courses")
+    parser.add_argument("--incremental", action="store_true", help="")
     parser.add_argument(
         "--updated-field",
         default="updated_at",
-        help="从 JSON 中提取 updated_at 的字段名/路径（点号路径），默认 'updated_at'",
+        help="updated_at",
     )
 
     args = parser.parse_args()
